@@ -270,7 +270,7 @@
 
             try {
                 // 改用localhost请求，和静态服务器同域
-                const res = await fetch('http://172.19.192.1:8000/api/generate_scene', {
+                const res = await fetch('http://192.168.10.7:8000/api/generate_scene', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
