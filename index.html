@@ -249,7 +249,110 @@
         const selectPage = document.getElementById('selectPage');
         const scenePage = document.getElementById('scenePage');
         const chatBox = document.getElementById('chatBox');
+        const API_BASE = 'http://127.0.0.1:8000';
+        const cache = new Map();
+
         let selectedEmotion = null;
+        let activeController = null;
+
+        function renderStory(storyPart, guidePart = "") {
+            let chatHtml = `
+                <div class="chat-bubble story-bubble">
+                    <strong>📖 故事场景</strong><br><br>
+                    ${storyPart || "正在编织故事..."}
+                </div>
+            `;
+            if (guidePart) {
+                chatHtml += `
+                    <div class="guide-avatar">
+                        <span class="avatar-name">星愿姐姐</span>
+                        <div class="avatar-circle">👩‍🏫</div>
+                    </div>
+                    <div class="chat-bubble guide-bubble">${guidePart}</div>
+                `;
+            }
+            chatBox.innerHTML = chatHtml;
+        }
+
+        function parseSceneText(sceneText) {
+            if (!sceneText || typeof sceneText !== 'string') {
+                return { storyPart: "很抱歉，故事加载出现了小问题，请稍后再试~", guidePart: "" };
+            }
+            if (sceneText.includes('【星愿姐姐引导】')) {
+                const parts = sceneText.split('【星愿姐姐引导】');
+                return {
+                    storyPart: (parts[0] || "").trim(),
+                    guidePart: (parts[1] || "").trim()
+                };
+            }
+            return { storyPart: sceneText.trim(), guidePart: "" };
+        }
+
+        async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+            const controller = options.signal ? null : new AbortController();
+            const signal = options.signal || controller.signal;
+            const timer = setTimeout(() => {
+                if (controller) controller.abort();
+            }, timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal });
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        async function fetchSceneJSON(emotion, signal) {
+            // 兼容老接口
+            const res = await fetchWithTimeout(`${API_BASE}/api/generate_scene`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ emotion, age: 6 }),
+                signal
+            }, 12000);
+            if (!res.ok) throw new Error('请求失败，状态码：' + res.status);
+            return await res.json();
+        }
+
+        async function fetchSceneStream(emotion, signal, onChunk) {
+            const res = await fetchWithTimeout(`${API_BASE}/api/generate_scene_stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ emotion, age: 6 }),
+                signal
+            }, 15000);
+            if (!res.ok || !res.body) throw new Error('流式请求失败，状态码：' + res.status);
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let fullText = "";
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value, { stream: true });
+                if (chunk) {
+                    fullText += chunk;
+                    onChunk(fullText);
+                }
+            }
+            return { scene: fullText };
+        }
+
+        async function prewarmInterests() {
+            const emotions = Array.from(emotionCards)
+                .map(card => card.dataset.emotion)
+                .filter(Boolean);
+            if (!emotions.length) return;
+            try {
+                await fetchWithTimeout(`${API_BASE}/api/prewarm`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ emotions, age: 6 })
+                }, 6000);
+            } catch (e) {
+                // 预热失败不影响主流程
+                console.warn('prewarm failed', e);
+            }
+        }
 
         // 情绪卡片选中
         emotionCards.forEach(card => {
@@ -261,70 +364,47 @@
             });
         });
 
-        // 点击开始探险（修复版，用localhost）
+        // 页面打开即预热常见选项，减少首次等待
+        prewarmInterests();
+
+        // 点击开始探险：优先秒开缓存，再流式刷新
         startBtn.addEventListener('click', async () => {
-            // 切换页面并显示加载状态
+            if (!selectedEmotion) return;
+
+            if (activeController) activeController.abort();
+            activeController = new AbortController();
+
             selectPage.style.display = 'none';
             scenePage.style.display = 'block';
             chatBox.innerHTML = `<div class="loading-text">正在加载情绪小故事，请稍等...</div>`;
 
+            // 1) 先用缓存，体感“立即出字”
+            if (cache.has(selectedEmotion)) {
+                const cached = cache.get(selectedEmotion);
+                const parsed = parseSceneText(cached.scene);
+                renderStory(parsed.storyPart, parsed.guidePart);
+            }
+
             try {
-                // 改用localhost请求，和静态服务器同域
-                const res = await fetch('http://192.168.10.7:8000/api/generate_scene', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        emotion: selectedEmotion,
-                        age: 6
-                    })
-                });
+                let data = null;
 
-                if (!res.ok) throw new Error('请求失败，状态码：' + res.status);
-                const data = await res.json();
-
-                // 安全拆分逻辑：兼容有/没有【星愿姐姐引导】的情况
-                let storyPart = "";
-                let guidePart = "";
-
-                if (data.scene && typeof data.scene === 'string') {
-                    if (data.scene.includes('【星愿姐姐引导】')) {
-                        const parts = data.scene.split('【星愿姐姐引导】');
-                        storyPart = (parts[0] || "").trim();
-                        guidePart = (parts[1] || "").trim();
-                    } else {
-                        storyPart = data.scene.trim();
-                        guidePart = "";
-                    }
-                } else {
-                    storyPart = "很抱歉，故事加载出现了小问题，请稍后再试~";
-                    guidePart = "";
+                // 2) 优先流式接口（边到边显示）
+                try {
+                    data = await fetchSceneStream(selectedEmotion, activeController.signal, (partialScene) => {
+                        renderStory(partialScene, "");
+                    });
+                } catch (streamErr) {
+                    // 3) 流式失败降级普通 JSON 接口
+                    data = await fetchSceneJSON(selectedEmotion, activeController.signal);
                 }
 
-                // 渲染对话气泡
-                let chatHtml = `
-                    <div class="chat-bubble story-bubble">
-                        <strong>📖 故事场景</strong><br><br>
-                        ${storyPart}
-                    </div>
-                `;
+                const parsed = parseSceneText(data.scene);
+                renderStory(parsed.storyPart, parsed.guidePart);
 
-                if (guidePart) {
-                    chatHtml += `
-                        <div class="guide-avatar">
-                            <span class="avatar-name">星愿姐姐</span>
-                            <div class="avatar-circle">👩‍🏫</div>
-                        </div>
-                        <div class="chat-bubble guide-bubble">
-                            ${guidePart}
-                        </div>
-                    `;
-                }
-
-                chatBox.innerHTML = chatHtml;
-
+                // 4) 写入内存缓存
+                cache.set(selectedEmotion, data);
             } catch (error) {
+                if (error.name === 'AbortError') return;
                 chatBox.innerHTML = `<div class="error-text">生成失败，请稍后再试</div>`;
                 console.error("完整错误信息：", error);
             }
