@@ -249,7 +249,7 @@
         const selectPage = document.getElementById('selectPage');
         const scenePage = document.getElementById('scenePage');
         const chatBox = document.getElementById('chatBox');
-        const API_BASE = 'http://192.168.10.7:8000';
+        const API_BASE = 'http://127.0.0.1:8000';
         const cache = new Map();
 
         let selectedEmotion = null;
@@ -301,23 +301,23 @@
             }
         }
 
-        async function fetchSceneJSON(emotion, signal) {
+        async function fetchSceneJSON(emotion, signal, refresh = false, nonce = "") {
             // 兼容老接口
             const res = await fetchWithTimeout(`${API_BASE}/api/generate_scene`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ emotion, age: 6 }),
+                body: JSON.stringify({ emotion, age: 6, refresh, nonce }),
                 signal
             }, 12000);
             if (!res.ok) throw new Error('请求失败，状态码：' + res.status);
             return await res.json();
         }
 
-        async function fetchSceneStream(emotion, signal, onChunk) {
+        async function fetchSceneStream(emotion, signal, onChunk, refresh = false, nonce = "") {
             const res = await fetchWithTimeout(`${API_BASE}/api/generate_scene_stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ emotion, age: 6 }),
+                body: JSON.stringify({ emotion, age: 6, refresh, nonce }),
                 signal
             }, 15000);
             if (!res.ok || !res.body) throw new Error('流式请求失败，状态码：' + res.status);
@@ -387,15 +387,17 @@
 
             try {
                 let data = null;
+                const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                const forceFresh = true;
 
                 // 2) 优先流式接口（边到边显示）
                 try {
                     data = await fetchSceneStream(selectedEmotion, activeController.signal, (partialScene) => {
                         renderStory(partialScene, "");
-                    });
+                    }, forceFresh, nonce);
                 } catch (streamErr) {
                     // 3) 流式失败降级普通 JSON 接口
-                    data = await fetchSceneJSON(selectedEmotion, activeController.signal);
+                    data = await fetchSceneJSON(selectedEmotion, activeController.signal, forceFresh, nonce);
                 }
 
                 const parsed = parseSceneText(data.scene);
